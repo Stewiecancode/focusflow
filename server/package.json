@@ -1,1 +1,23 @@
-{"name":"@focusflow/server","version":"1.0.0","private":true,"type":"module","scripts":{"dev":"tsx watch src/index.ts","build":"tsc","typecheck":"tsc --noEmit","start":"node dist/index.js","test":"tsx --test src/*.test.ts"},"dependencies":{"express":"^5.1.0","zod":"^4.1.13","dotenv":"^17.2.3"},"devDependencies":{"@types/express":"^5.0.5","@types/node":"^24.10.1","tsx":"^4.20.6"}}
+{
+  "name": "@focusflow/server",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "node --watch src/index.ts",
+    "build": "tsc",
+    "typecheck": "tsc --noEmit",
+    "start": "node dist/index.js",
+    "test": "node --test src/*.test.ts"
+  },
+  "dependencies": {
+    "express": "^5.1.0",
+    "zod": "^4.1.13",
+    "dotenv": "^17.2.3"
+  },
+  "devDependencies": {
+    "@types/express": "^5.0.5",
+    "@types/node": "^24.10.1",
+    "tsx": "^4.20.6"
+  }
+}
