@@ -41,7 +41,7 @@ In restrictive Windows sandboxes, Vite's development dependency optimizer may be
 
 ## Private GitHub repository
 
-GitHub CLI was unavailable in the creation environment, so this project currently has a local Git repository only. After installing GitHub CLI and authenticating, run these commands from the `focusflow` directory:
+The private repository is https://github.com/Stewiecancode/focusflow. The local `origin` remote points to this repository. The following commands document authentication and verification for future development (repository creation is only needed for a new copy):
 
 ```powershell
 gh auth login
@@ -53,3 +53,4 @@ git rev-parse origin/main
 ```
 
 The last two hashes should match. If a private remote repository already exists, use `git remote add origin https://github.com/YOUR_USERNAME/focusflow.git` and `git push -u origin main` instead of creating it again.
+
