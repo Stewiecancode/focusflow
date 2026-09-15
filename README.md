@@ -1,6 +1,6 @@
 # FocusFlow
 
-A privacy-conscious productivity application built with React, TypeScript, Vite, Express, and SQLite. Organize your own workspaces and projects, schedule tasks across them, and record focused work.
+A privacy-conscious productivity application built with React, TypeScript, Vite, Express, PostgreSQL for hosted production, and SQLite for local development. Organize your own workspaces and projects, schedule tasks across them, and record focused work.
 
 ## Development
 
@@ -27,11 +27,11 @@ The profile asks only “What should we call you?”. Email and password are use
 
 ## Data and security
 
-The hierarchy is User → Workspace → Project → Task → Calendar Block / Focus Session. SQLite stores each user's validated workspace state, with optimistic revision checks to prevent silent overwrites from another tab. Authentication uses salted scrypt password hashes and random, hashed server-side session tokens. Cookies are HttpOnly and SameSite=Strict, with Secure enabled in production. Sessions expire after seven days. Auth attempts are rate-limited per server process.
+The hierarchy is User → Workspace → Project → Task → Calendar Block / Focus Session. The configured database stores each user's validated workspace state, with optimistic revision checks to prevent silent overwrites from another tab. Authentication uses salted scrypt password hashes and random, hashed server-side session tokens. Cookies are HttpOnly and SameSite=Strict, with Secure enabled in production. Sessions expire after seven days. Auth attempts are rate-limited per server process.
 
-The database is created in `server/data/` with default settings. Back up the database before upgrades; it is deliberately not committed. No email service, tracking, or personal-background fields are configured. Fonts are loaded from Google Fonts with local font fallbacks.
+The local database is created in `server/data/` with default settings. Production uses the `DATABASE_URL` environment variable for hosted Postgres. Back up the database before upgrades; it is deliberately not committed. No email service, tracking, or personal-background fields are configured. Fonts are loaded from Google Fonts with local font fallbacks.
 
-This is a runnable single-server foundation. Before an internet production launch, configure HTTPS, persistent disk and backups, and your account recovery/email verification policy. Password recovery, email verification, collaboration, and external calendar synchronization are not implemented. The in-memory rate limiter is intended for one server instance. SQLite's Node API currently emits an experimental warning on some Node versions.
+See [DEPLOYMENT.md](DEPLOYMENT.md) for the free Render, Vercel, and Neon configuration. This is a runnable single-server foundation. Before an internet production launch, configure HTTPS, persistent disk and backups, and your account recovery/email verification policy. Password recovery, email verification, collaboration, and external calendar synchronization are not implemented. The in-memory rate limiter is intended for one server instance. SQLite's Node API currently emits an experimental warning on some Node versions.
 
 ## Verification
 
@@ -53,4 +53,5 @@ git rev-parse origin/main
 ```
 
 The last two hashes should match. If a private remote repository already exists, use `git remote add origin https://github.com/YOUR_USERNAME/focusflow.git` and `git push -u origin main` instead of creating it again.
+
 

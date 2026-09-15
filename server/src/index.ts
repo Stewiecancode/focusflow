@@ -1,6 +1,5 @@
 import express from "express";
-import { DatabaseSync } from "node:sqlite";
-import { mkdirSync } from "node:fs";
+import { createDatabase } from "./database.ts";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { randomBytes, scrypt, timingSafeEqual, createHash } from "node:crypto";
@@ -9,25 +8,57 @@ import "dotenv/config";
 import { z } from "zod";
 import { emptyState, stateSchema, schedule } from "./model.ts";
 const derive = promisify(scrypt);
-const dbPath = process.env.DATABASE_PATH || "./data/focusflow.sqlite";
-if (dbPath !== ":memory:") mkdirSync(path.dirname(dbPath), { recursive: true });
-const db = new DatabaseSync(dbPath);
-db.exec(`PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON;
-CREATE TABLE IF NOT EXISTS users(id TEXT PRIMARY KEY,name TEXT NOT NULL,email TEXT UNIQUE NOT NULL,password TEXT NOT NULL,state TEXT NOT NULL,revision INTEGER NOT NULL DEFAULT 0);
-CREATE TABLE IF NOT EXISTS sessions(token TEXT PRIMARY KEY,user_id TEXT REFERENCES users(id) ON DELETE CASCADE,expires INTEGER NOT NULL);`);
+const production = process.env.NODE_ENV === "production";
+const allowedOrigins = new Set(
+  (process.env.APP_ORIGINS || "")
+    .split(",")
+    .map((value) => value.trim())
+    .filter(Boolean),
+);
+if (production && !allowedOrigins.size) {
+  throw new Error(
+    "Production requires APP_ORIGINS with the exact frontend HTTPS origin",
+  );
+}
+for (const origin of allowedOrigins) {
+  const parsed = new URL(origin);
+  if (
+    parsed.origin !== origin ||
+    (production && parsed.protocol !== "https:")
+  ) {
+    throw new Error(
+      "APP_ORIGINS must contain exact origins, using HTTPS in production",
+    );
+  }
+}
+const db = await createDatabase();
 const app = express();
 app.disable("x-powered-by");
+// Render is the immediate trusted reverse proxy. Do not trust arbitrary chains.
+if (production) app.set("trust proxy", 1);
 app.use(express.json({ limit: "2mb" }));
 app.use((req, res, next) => {
   res.setHeader("X-Content-Type-Options", "nosniff");
   res.setHeader("Referrer-Policy", "same-origin");
   if (req.path.startsWith("/api")) res.setHeader("Cache-Control", "no-store");
-  if (
-    !["GET", "HEAD", "OPTIONS"].includes(req.method) &&
-    req.headers.origin &&
-    new URL(req.headers.origin).host !== req.headers.host
-  )
-    return res.status(403).json({ error: "Origin not allowed" });
+  if (!["GET", "HEAD", "OPTIONS"].includes(req.method)) {
+    if (!req.is("application/json"))
+      return res.status(415).json({ error: "Use application/json" });
+    const origin = req.headers.origin;
+    if (origin) {
+      let permitted = allowedOrigins.has(origin);
+      if (!production) {
+        try {
+          permitted ||=
+            new URL(origin).origin === `${req.protocol}://${req.headers.host}`;
+        } catch {
+          /* Invalid origins are rejected. */
+        }
+      }
+      if (!permitted)
+        return res.status(403).json({ error: "Origin not allowed" });
+    }
+  }
   next();
 });
 type User = {
@@ -47,12 +78,12 @@ const token = (req: express.Request) => {
       .slice(10) || "";
   return createHash("sha256").update(raw).digest("hex");
 };
-app.use("/api", (req, res, next) => {
-  const user = db
+app.use("/api", async (req, res, next) => {
+  const user = (await db
     .prepare(
       "SELECT users.* FROM users JOIN sessions ON users.id=sessions.user_id WHERE token=? AND expires>?",
     )
-    .get(token(req), Date.now()) as User | undefined;
+    .get(token(req), Date.now())) as User | undefined;
   res.locals.user = user;
   next();
 });
@@ -85,14 +116,13 @@ app.post("/api/auth/:action", async (req, res) => {
       .json({ error: "Too many attempts. Try again in 15 minutes." });
   const parsed = credentials.safeParse(req.body);
   if (!parsed.success)
-    return res
-      .status(400)
-      .json({
-        error: "Use a valid email and a password of 10–128 characters.",
-      });
+    return res.status(400).json({
+      error: "Use a valid email and a password of 10–128 characters.",
+    });
   const { email, password, name } = parsed.data;
-  let user = db.prepare("SELECT * FROM users WHERE email=?").get(email) as
-    User | undefined;
+  let user = (await db
+    .prepare("SELECT * FROM users WHERE email=?")
+    .get(email)) as User | undefined;
   if (req.params.action === "register") {
     if (!name)
       return res.status(400).json({ error: "Please enter your name." });
@@ -103,16 +133,18 @@ app.post("/api/auth/:action", async (req, res) => {
     const salt = randomBytes(16).toString("hex");
     const hash = (await derive(password, salt, 64)) as Buffer;
     const id = crypto.randomUUID();
-    db.prepare(
-      "INSERT INTO users(id,name,email,password,state) VALUES(?,?,?,?,?)",
-    ).run(
-      id,
-      name,
-      email,
-      salt + ":" + hash.toString("hex"),
-      JSON.stringify(emptyState()),
-    );
-    user = db.prepare("SELECT * FROM users WHERE id=?").get(id) as User;
+    await db
+      .prepare(
+        "INSERT INTO users(id,name,email,password,state) VALUES(?,?,?,?,?)",
+      )
+      .run(
+        id,
+        name,
+        email,
+        salt + ":" + hash.toString("hex"),
+        JSON.stringify(emptyState()),
+      );
+    user = (await db.prepare("SELECT * FROM users WHERE id=?").get(id)) as User;
   } else {
     const [salt, hash] = (user?.password || "dummy:" + "0".repeat(128)).split(
       ":",
@@ -121,28 +153,33 @@ app.post("/api/auth/:action", async (req, res) => {
     if (!user || !timingSafeEqual(actual, Buffer.from(hash, "hex")))
       return res.status(401).json({ error: "Email or password is incorrect." });
   }
-  db.prepare("DELETE FROM sessions WHERE expires<?").run(Date.now());
+  await db.prepare("DELETE FROM sessions WHERE expires<?").run(Date.now());
   const raw = randomBytes(32).toString("hex");
-  db.prepare("INSERT INTO sessions VALUES(?,?,?)").run(
-    createHash("sha256").update(raw).digest("hex"),
-    user.id,
-    Date.now() + 604800000,
-  );
+  await db
+    .prepare("INSERT INTO sessions VALUES(?,?,?)")
+    .run(
+      createHash("sha256").update(raw).digest("hex"),
+      user.id,
+      Date.now() + 604800000,
+    );
   res.cookie("focusflow", raw, {
     httpOnly: true,
     sameSite: "strict",
-    secure: process.env.NODE_ENV === "production",
+    secure: production,
     maxAge: 604800000,
     path: "/",
   });
   res.json({ name: user.name });
 });
-app.get("/api/health", (_req, res) => res.json({ ok: true }));
+app.get("/api/health", async (_req, res) => {
+  await db.prepare("SELECT 1").get();
+  res.json({ ok: true });
+});
 app.use("/api", (_req, res, next) =>
   res.locals.user ? next() : res.status(401).json({ error: "Please sign in." }),
 );
-app.post("/api/logout", (req, res) => {
-  db.prepare("DELETE FROM sessions WHERE token=?").run(token(req));
+app.post("/api/logout", async (req, res) => {
+  await db.prepare("DELETE FROM sessions WHERE token=?").run(token(req));
   res.clearCookie("focusflow", { path: "/" });
   res.json({ ok: true });
 });
@@ -150,25 +187,23 @@ app.get("/api/state", (_req, res) => {
   const u = res.locals.user as User;
   res.json({ name: u.name, state: JSON.parse(u.state), revision: u.revision });
 });
-app.put("/api/state", (req, res) => {
+app.put("/api/state", async (req, res) => {
   const parsed = stateSchema.safeParse(req.body.state);
   if (!parsed.success)
     return res.status(400).json({ error: parsed.error.issues[0].message });
   const u = res.locals.user as User;
-  const r = db
+  const r = await db
     .prepare(
       "UPDATE users SET state=?,revision=revision+1 WHERE id=? AND revision=?",
     )
     .run(JSON.stringify(parsed.data), u.id, Number(req.body.revision));
   if (!r.changes)
-    return res
-      .status(409)
-      .json({
-        error: "Your data changed in another tab. Reload before trying again.",
-      });
+    return res.status(409).json({
+      error: "Your data changed in another tab. Reload before trying again.",
+    });
   res.json({ revision: u.revision + 1 });
 });
-app.post("/api/schedule", (req, res) => {
+app.post("/api/schedule", async (req, res) => {
   const u = res.locals.user as User;
   try {
     const state = schedule(
@@ -176,7 +211,7 @@ app.post("/api/schedule", (req, res) => {
       req.body.start,
       req.body.end,
     );
-    const r = db
+    const r = await db
       .prepare(
         "UPDATE users SET state=?,revision=revision+1 WHERE id=? AND revision=?",
       )
@@ -210,13 +245,27 @@ app.use(
     _next: express.NextFunction,
   ) => {
     void _next;
-    console.error(err.message);
-    res.status(500).json({ error: "The request could not be completed." });
+    const status =
+      "status" in err &&
+      typeof err.status === "number" &&
+      err.status >= 400 &&
+      err.status < 500
+        ? err.status
+        : 500;
+    if (status === 500) console.error(err.message);
+    res.status(status).json({
+      error:
+        status === 400
+          ? "Invalid JSON request."
+          : status === 413
+            ? "Request is too large."
+            : "The request could not be completed.",
+    });
   },
 );
 app.listen(
   Number(process.env.PORT || 3001),
-  process.env.HOST || "127.0.0.1",
+  process.env.HOST || (production ? "0.0.0.0" : "127.0.0.1"),
   () =>
     console.log(
       `FocusFlow running at http://${process.env.HOST || "127.0.0.1"}:${process.env.PORT || 3001}`,

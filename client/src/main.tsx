@@ -62,7 +62,9 @@ async function api(url: string, method = "GET", body?: unknown) {
     headers: { "Content-Type": "application/json" },
     body: body ? JSON.stringify(body) : undefined,
   });
-  const data = await r.json();
+  const data = await r.json().catch(() => {
+    throw new Error("The server is unavailable. Please try again shortly.");
+  });
   if (!r.ok)
     throw new Error(data.error || "Something went wrong. Please try again.");
   return data;
