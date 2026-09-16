@@ -306,7 +306,7 @@ function App() {
       <div className="auth">
         <div className="auth-story">
           <div className="brand">
-            <span className="brand-icon">f</span>FocusFlow
+            <img className="brand-icon" src="/logo.svg" alt="" />FocusFlow
           </div>
           <div>
             <span className="eyebrow">SPACE TO THINK. ROOM TO DO.</span>
@@ -420,7 +420,7 @@ function App() {
     <div className="app">
       <aside>
         <div className="brand">
-          <span className="brand-icon">f</span>FocusFlow
+          <img className="brand-icon" src="/logo.svg" alt="" />FocusFlow
         </div>
         <span className="nav-label">YOUR SPACE</span>
         <nav>

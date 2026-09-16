@@ -128,16 +128,10 @@ h3 {
   letter-spacing: -0.6px;
 }
 .brand-icon {
-  display: grid;
-  place-items: center;
-  width: 32px;
-  height: 34px;
-  background: var(--purple);
-  color: white;
-  font-size: 1.9rem;
-  border-radius: 10px;
-  font-style: italic;
-  line-height: 1;
+  display: block;
+  width: 36px;
+  height: 36px;
+  flex-shrink: 0;
 }
 .app {
   display: flex;
