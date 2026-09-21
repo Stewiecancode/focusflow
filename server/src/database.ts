@@ -30,6 +30,12 @@ export async function createDatabase() {
             const result = await pool.query(query, values);
             return { changes: result.rowCount || 0 };
           },
+          async all(...values: SQLInputValue[]) {
+            return (await pool.query(query, values)).rows as Record<
+              string,
+              unknown
+            >[];
+          },
         };
       },
     };
@@ -56,6 +62,9 @@ export async function createDatabase() {
         },
         async run(...values: SQLInputValue[]) {
           return statement.run(...values);
+        },
+        async all(...values: SQLInputValue[]) {
+          return statement.all(...values);
         },
       };
     },

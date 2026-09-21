@@ -7,6 +7,14 @@ import { promisify } from "node:util";
 import "dotenv/config";
 import { z } from "zod";
 import { emptyState, stateSchema, schedule } from "./model.ts";
+import {
+  initReminders,
+  createReminderWorker,
+  getPreferences,
+  preferencesSchema,
+  deliveryConfiguration,
+  cronAuthorized,
+} from "./reminders.ts";
 const derive = promisify(scrypt);
 const production = process.env.NODE_ENV === "production";
 const allowedOrigins = new Set(
@@ -32,6 +40,8 @@ for (const origin of allowedOrigins) {
   }
 }
 const db = await createDatabase();
+await initReminders(db);
+const reminderWorker = createReminderWorker(db);
 const app = express();
 app.disable("x-powered-by");
 // Render is the immediate trusted reverse proxy. Do not trust arbitrary chains.
@@ -69,13 +79,25 @@ type User = {
   state: string;
   revision: number;
 };
+app.post("/api/internal/reminders/run", async (req, res) => {
+  if (!cronAuthorized(req.headers.authorization))
+    return res.status(401).json({ error: "Unauthorized" });
+  await reminderWorker.tick();
+  await reminderWorker.receipts();
+  res.json({ ok: true });
+});
 const token = (req: express.Request) => {
+  const bearer = req.headers.authorization?.match(
+    /^Bearer ([a-f0-9]{64})$/,
+  )?.[1];
   const raw =
+    bearer ||
     req.headers.cookie
       ?.split(";")
       .find((c) => c.trim().startsWith("focusflow="))
       ?.trim()
-      .slice(10) || "";
+      .slice(10) ||
+    "";
   return createHash("sha256").update(raw).digest("hex");
 };
 app.use("/api", async (req, res, next) => {
@@ -169,7 +191,12 @@ app.post("/api/auth/:action", async (req, res) => {
     maxAge: 604800000,
     path: "/",
   });
-  res.json({ name: user.name });
+  res.json({
+    name: user.name,
+    ...(req.headers["x-focusflow-client"] === "native"
+      ? { sessionToken: raw }
+      : {}),
+  });
 });
 app.get("/api/health", async (_req, res) => {
   await db.prepare("SELECT 1").get();
@@ -179,19 +206,153 @@ app.use("/api", (_req, res, next) =>
   res.locals.user ? next() : res.status(401).json({ error: "Please sign in." }),
 );
 app.post("/api/logout", async (req, res) => {
+  await db
+    .prepare("DELETE FROM push_devices WHERE session_token=?")
+    .run(token(req));
   await db.prepare("DELETE FROM sessions WHERE token=?").run(token(req));
   res.clearCookie("focusflow", { path: "/" });
   res.json({ ok: true });
 });
 app.get("/api/state", (_req, res) => {
   const u = res.locals.user as User;
-  res.json({ name: u.name, state: JSON.parse(u.state), revision: u.revision });
+  res.json({
+    name: u.name,
+    state: JSON.parse(u.state),
+    revision: u.revision,
+    features: { reminders: true },
+  });
 });
-app.put("/api/state", async (req, res) => {
-  const parsed = stateSchema.safeParse(req.body.state);
+app.get("/api/reminders", async (_req, res) => {
+  const u = res.locals.user as User;
+  const preferences = await getPreferences(db, u.id);
+  await reminderWorker.tick(Date.now(), u.id, true);
+  const rows = await db
+    .prepare(
+      "SELECT id,payload,read_at FROM reminder_inbox WHERE user_id=? AND visible=1 ORDER BY due_at DESC LIMIT 100",
+    )
+    .all(u.id);
+  const count = await db
+    .prepare(
+      "SELECT COUNT(*) AS count FROM reminder_inbox WHERE user_id=? AND visible=1 AND read_at=0",
+    )
+    .get(u.id);
+  const devices = await db
+    .prepare(
+      "SELECT COUNT(*) AS count FROM push_devices WHERE user_id=? AND expires>?",
+    )
+    .get(u.id, Date.now());
+  const deliveries = await db
+    .prepare(
+      "SELECT notification_id,channel,status FROM reminder_deliveries WHERE user_id=?",
+    )
+    .all(u.id);
+  res.json({
+    preferences,
+    email: u.email,
+    configuration: deliveryConfiguration(),
+    deviceCount: Number(devices!.count),
+    unread: Number(count!.count),
+    items: rows.map((r) => ({
+      ...JSON.parse(String(r.payload)),
+      read: !!Number(r.read_at),
+      deliveries: deliveries
+        .filter((d) => d.notification_id === r.id)
+        .map((d) => ({ channel: d.channel, status: d.status })),
+    })),
+  });
+});
+app.put("/api/reminders/preferences", async (req, res) => {
+  const parsed = preferencesSchema.safeParse(req.body);
   if (!parsed.success)
     return res.status(400).json({ error: parsed.error.issues[0].message });
   const u = res.locals.user as User;
+  const existing = await getPreferences(db, u.id);
+  // A new opt-in starts now; editing a timezone does not resend old messages.
+  const newOptIn =
+    (!existing.email && parsed.data.email) ||
+    (!existing.push && parsed.data.push);
+  await db
+    .prepare("UPDATE reminder_preferences SET settings=? WHERE user_id=?")
+    .run(JSON.stringify(parsed.data), u.id);
+  if (newOptIn)
+    await db
+      .prepare(
+        "UPDATE reminder_preferences SET enabled_since=? WHERE user_id=?",
+      )
+      .run(Date.now(), u.id);
+  res.json({ ok: true });
+});
+app.post("/api/reminders/read", async (req, res) => {
+  const parsed = z
+    .object({
+      id: z
+        .string()
+        .regex(/^[a-f0-9]{64}$/)
+        .optional(),
+    })
+    .safeParse(req.body);
+  if (!parsed.success)
+    return res.status(400).json({ error: "Invalid notification" });
+  const userId = (res.locals.user as User).id;
+  if (parsed.data.id)
+    await db
+      .prepare("UPDATE reminder_inbox SET read_at=? WHERE id=? AND user_id=?")
+      .run(Date.now(), parsed.data.id, userId);
+  else
+    await db
+      .prepare(
+        "UPDATE reminder_inbox SET read_at=? WHERE user_id=? AND read_at=0",
+      )
+      .run(Date.now(), userId);
+  res.json({ ok: true });
+});
+const deviceSchema = z.object({
+  token: z
+    .string()
+    .regex(/^(ExponentPushToken|ExpoPushToken)\[[A-Za-z0-9_-]+\]$/)
+    .max(250),
+});
+app.post("/api/reminders/devices", async (req, res) => {
+  const parsed = deviceSchema.safeParse(req.body);
+  if (!parsed.success)
+    return res.status(400).json({ error: "Invalid Expo push token" });
+  const session = await db
+    .prepare("SELECT expires FROM sessions WHERE token=?")
+    .get(token(req));
+  await db
+    .prepare(
+      "INSERT INTO push_devices(token,user_id,session_token,expires) VALUES(?,?,?,?) ON CONFLICT(token) DO UPDATE SET user_id=excluded.user_id,session_token=excluded.session_token,expires=excluded.expires",
+    )
+    .run(
+      parsed.data.token,
+      (res.locals.user as User).id,
+      token(req),
+      Number(session!.expires),
+    );
+  res.json({ ok: true });
+});
+app.delete("/api/reminders/devices", async (req, res) => {
+  const parsed = deviceSchema.safeParse(req.body);
+  if (!parsed.success)
+    return res.status(400).json({ error: "Invalid Expo push token" });
+  await db
+    .prepare("DELETE FROM push_devices WHERE token=? AND user_id=?")
+    .run(parsed.data.token, (res.locals.user as User).id);
+  res.json({ ok: true });
+});
+app.put("/api/state", async (req, res) => {
+  const u = res.locals.user as User;
+  // Older web clients do not know about meetings. Preserve them on legacy saves.
+  const incoming =
+    req.body.state && typeof req.body.state === "object"
+      ? {
+          ...req.body.state,
+          meetings: req.body.state.meetings ?? JSON.parse(u.state).meetings,
+        }
+      : req.body.state;
+  const parsed = stateSchema.safeParse(incoming);
+  if (!parsed.success)
+    return res.status(400).json({ error: parsed.error.issues[0].message });
   const r = await db
     .prepare(
       "UPDATE users SET state=?,revision=revision+1 WHERE id=? AND revision=?",
@@ -271,3 +432,15 @@ app.listen(
       `FocusFlow running at http://${process.env.HOST || "127.0.0.1"}:${process.env.PORT || 3001}`,
     ),
 );
+if (
+  process.env.NODE_ENV !== "test" &&
+  process.env.REMINDER_WORKER_DISABLED !== "true"
+) {
+  const interval = setInterval(() => {
+    reminderWorker
+      .tick()
+      .then(() => reminderWorker.receipts())
+      .catch(() => console.error("Reminder worker failed; it will retry."));
+  }, 30000);
+  interval.unref();
+}

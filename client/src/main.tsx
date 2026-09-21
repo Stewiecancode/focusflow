@@ -19,6 +19,14 @@ import {
   Sparkles,
 } from "lucide-react";
 import "./style.css";
+import { Notifications } from "./Notifications";
+type Meeting = {
+  id: string;
+  title: string;
+  start: string;
+  end: string;
+  location: string;
+};
 type Workspace = { id: string; name: string; color: string };
 type Project = { id: string; name: string; workspaceId: string };
 type Task = {
@@ -43,6 +51,7 @@ type State = {
   tasks: Task[];
   blocks: Block[];
   sessions: Session[];
+  meetings?: Meeting[];
 };
 const blank: State = {
   workspaces: [],
@@ -70,6 +79,8 @@ async function api(url: string, method = "GET", body?: unknown) {
   return data;
 }
 function App() {
+  const [unread, setUnread] = useState(0);
+  const [meeting, setMeeting] = useState<Meeting | null>(null);
   const [state, setState] = useState<State>(blank),
     [name, setName] = useState(""),
     [revision, setRevision] = useState(0),
@@ -186,6 +197,7 @@ function App() {
   function close() {
     setModal("");
     setEditing(null);
+    setMeeting(null);
   }
   function addTask() {
     setEditing(null);
@@ -196,6 +208,26 @@ function App() {
     const f = new FormData(e.currentTarget);
     await action(async () => {
       const next = structuredClone(state);
+      if (modal === "meeting") {
+        const start = new Date(String(f.get("start"))),
+          end = new Date(String(f.get("end")));
+        if (
+          !Number.isFinite(start.getTime()) ||
+          !Number.isFinite(end.getTime()) ||
+          end <= start
+        )
+          throw Error("Choose an end time after the start.");
+        const value: Meeting = {
+          id: meeting?.id || uid(),
+          title: String(f.get("title")).trim(),
+          start: start.toISOString(),
+          end: end.toISOString(),
+          location: String(f.get("location")).trim(),
+        };
+        next.meetings = meeting
+          ? (next.meetings || []).map((m) => (m.id === meeting.id ? value : m))
+          : [...(next.meetings || []), value];
+      }
       if (modal === "workspace")
         next.workspaces.push({
           id: uid(),
@@ -306,7 +338,8 @@ function App() {
       <div className="auth">
         <div className="auth-story">
           <div className="brand">
-            <img className="brand-icon" src="/logo.svg" alt="" />FocusFlow
+            <img className="brand-icon" src="/logo.svg" alt="" />
+            FocusFlow
           </div>
           <div>
             <span className="eyebrow">SPACE TO THINK. ROOM TO DO.</span>
@@ -420,7 +453,8 @@ function App() {
     <div className="app">
       <aside>
         <div className="brand">
-          <img className="brand-icon" src="/logo.svg" alt="" />FocusFlow
+          <img className="brand-icon" src="/logo.svg" alt="" />
+          FocusFlow
         </div>
         <span className="nav-label">YOUR SPACE</span>
         <nav>
@@ -520,6 +554,12 @@ function App() {
               : "All workspaces"}{" "}
             <span className="slash">/</span> <b>{view}</b>
           </span>
+          <button
+            className="secondary"
+            onClick={() => setView("Notifications")}
+          >
+            Notifications {unread > 0 ? `(${unread})` : ""}
+          </button>
           <span className="header-date">
             {new Date().toLocaleDateString([], {
               weekday: "short",
@@ -802,6 +842,15 @@ function App() {
               )}
             </section>
           )}
+          <div hidden={view !== "Notifications"}>
+            <Notifications
+              onCount={setUnread}
+              onOpen={(start) => {
+                setDay(dateKey(new Date(start)));
+                setView("Calendar");
+              }}
+            />
+          </div>
           {view === "Calendar" && (
             <section className="panel calendar">
               <div className="panel-title">
@@ -849,6 +898,15 @@ function App() {
                     <Plus size={16} />
                     Time block
                   </button>
+                  <button
+                    className="secondary"
+                    onClick={() => {
+                      setMeeting(null);
+                      setModal("meeting");
+                    }}
+                  >
+                    New meeting
+                  </button>
                 </div>
               </div>
               <div className="calendar-grid">
@@ -856,6 +914,55 @@ function App() {
                   <div className="hour" key={hour}>
                     <span>{String(hour).padStart(2, "0")}:00</span>
                     <div>
+                      {(state.meetings || [])
+                        .filter(
+                          (m) =>
+                            dateKey(new Date(m.start)) === day &&
+                            new Date(m.start).getHours() === hour,
+                        )
+                        .map((m) => (
+                          <div
+                            className="calendar-block meeting-block"
+                            key={m.id}
+                          >
+                            <button
+                              className="task-title"
+                              onClick={() => {
+                                setMeeting(m);
+                                setModal("meeting");
+                              }}
+                            >
+                              <strong>{m.title}</strong>
+                              <span>
+                                {time(m.start)} –{" "}
+                                {new Date(m.end).toLocaleString()} · Meeting{" "}
+                                {m.location && `· ${m.location}`}
+                              </span>
+                            </button>
+                            <button
+                              className="icon"
+                              aria-label={"Delete meeting " + m.title}
+                              disabled={busy}
+                              onClick={() => {
+                                if (
+                                  window.confirm(
+                                    `Delete ${m.title} and its future reminders?`,
+                                  )
+                                )
+                                  void action(() =>
+                                    save({
+                                      ...state,
+                                      meetings: (state.meetings || []).filter(
+                                        (x) => x.id !== m.id,
+                                      ),
+                                    }),
+                                  );
+                              }}
+                            >
+                              <X size={16} />
+                            </button>
+                          </div>
+                        ))}
                       {blocks
                         .filter((b) => new Date(b.start).getHours() === hour)
                         .map((b) => {
@@ -1063,17 +1170,21 @@ function App() {
           >
             <div className="panel-title">
               <h2 id="modal-title">
-                {modal === "workspace"
-                  ? "Create a workspace"
-                  : modal === "project"
-                    ? "Create a project"
-                    : modal === "task"
-                      ? editing
-                        ? "Edit task"
-                        : "New task"
-                      : modal === "schedule"
-                        ? "Plan your time"
-                        : "Schedule a task"}
+                {modal === "meeting"
+                  ? meeting
+                    ? "Edit meeting"
+                    : "New meeting"
+                  : modal === "workspace"
+                    ? "Create a workspace"
+                    : modal === "project"
+                      ? "Create a project"
+                      : modal === "task"
+                        ? editing
+                          ? "Edit task"
+                          : "New task"
+                        : modal === "schedule"
+                          ? "Plan your time"
+                          : "Schedule a task"}
               </h2>
               <button
                 className="icon"
@@ -1084,6 +1195,57 @@ function App() {
               </button>
             </div>
             <form onSubmit={submit}>
+              {modal === "meeting" && (
+                <>
+                  <label>
+                    Meeting title
+                    <input
+                      name="title"
+                      required
+                      maxLength={120}
+                      defaultValue={meeting?.title || ""}
+                    />
+                  </label>
+                  <label>
+                    Starts
+                    <input
+                      name="start"
+                      type="datetime-local"
+                      required
+                      defaultValue={
+                        meeting
+                          ? `${dateKey(new Date(meeting.start))}T${String(new Date(meeting.start).getHours()).padStart(2, "0")}:${String(new Date(meeting.start).getMinutes()).padStart(2, "0")}`
+                          : `${day}T09:00`
+                      }
+                    />
+                  </label>
+                  <label>
+                    Ends
+                    <input
+                      name="end"
+                      type="datetime-local"
+                      required
+                      defaultValue={
+                        meeting
+                          ? `${dateKey(new Date(meeting.end))}T${String(new Date(meeting.end).getHours()).padStart(2, "0")}:${String(new Date(meeting.end).getMinutes()).padStart(2, "0")}`
+                          : `${day}T09:30`
+                      }
+                    />
+                  </label>
+                  <label>
+                    Location or meeting link
+                    <input
+                      name="location"
+                      maxLength={300}
+                      defaultValue={meeting?.location || ""}
+                    />
+                  </label>
+                  <p>
+                    Times use this device’s time zone. Set reminder preferences
+                    in Notifications.
+                  </p>
+                </>
+              )}
               {(modal === "workspace" || modal === "project") && (
                 <label>
                   Name

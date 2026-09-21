@@ -37,6 +37,18 @@ export const stateSchema = z
         completedAt: z.string().datetime(),
       }),
     ),
+    meetings: z
+      .array(
+        z.object({
+          id,
+          title: name,
+          start: z.string().datetime(),
+          end: z.string().datetime(),
+          location: z.string().trim().max(300).default(""),
+        }),
+      )
+      .max(1000)
+      .optional(),
   })
   .superRefine((s, ctx) => {
     const all = [
@@ -45,6 +57,7 @@ export const stateSchema = z
       ...s.tasks,
       ...s.blocks,
       ...s.sessions,
+      ...(s.meetings || []),
     ].map((x) => x.id);
     const invalid =
       new Set(all).size !== all.length ||
@@ -60,7 +73,9 @@ export const stateSchema = z
         code: "custom",
         message: "Invalid or duplicate relationship",
       });
-    const blocks = [...s.blocks].sort((a, b) => a.start.localeCompare(b.start));
+    const blocks = [...s.blocks, ...(s.meetings || [])].sort((a, b) =>
+      a.start.localeCompare(b.start),
+    );
     if (
       blocks.some(
         (b, i) =>
@@ -71,7 +86,7 @@ export const stateSchema = z
       ctx.addIssue({
         code: "custom",
         message:
-          "Calendar blocks must have a positive duration and cannot overlap",
+          "Calendar blocks and meetings must have a positive duration and cannot overlap",
       });
   });
 export type State = z.infer<typeof stateSchema>;
@@ -104,8 +119,8 @@ export function schedule(state: State, start: string, end: string) {
   for (const task of pending) {
     let candidate = cursor;
     const duration = task.minutes * 60000;
-    for (const block of [...result.blocks].sort((a, b) =>
-      a.start.localeCompare(b.start),
+    for (const block of [...result.blocks, ...(result.meetings || [])].sort(
+      (a, b) => a.start.localeCompare(b.start),
     )) {
       if (candidate + duration <= Date.parse(block.start)) break;
       if (
